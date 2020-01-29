@@ -1,0 +1,470 @@
+---
+title: "RMSC4002"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+set seed
+```{r}
+set.seed(4002)
+working_dir = 'C:\\Users\\s1155102964\\Desktop\\hw\\RMSC4002\\pj\\'
+```
+
+parallel processing
+```{r}
+library('doParallel')
+clust = makeCluster(detectCores())
+registerDoParallel(clust)
+getDoParWorkers()
+```
+
+required library
+```{r}
+library(rpart)
+library(quantmod)
+library(anytime)
+library(lubridate)
+library(nnet)
+library(rgr)
+library(dplyr)
+library(rdbnomics)
+library(stringr)
+library(ggplot2)
+library(reshape2)
+library(ROCR)
+```
+
+
+
+label the data and remove the first column since it is NA 
+col explain
+open = today open price, close = yesterday close price, tmr_price = whether it is going upward or downward
+```{r}
+DJI = data.frame(tseries::get.hist.quote(instrument="^DJI",'2010-1-1','2018-12-31'))[,-(2:3)]
+DJI_dict = DJI
+```
+
+
+identify whether index will goes up or down compare to end of month price
+use regex to identify the last day of the month
+and then do the comparison
+create a column contains $\frac{\mu}{\sigma^2}$ of the previous 20 days
+```{r}
+mon = str_extract(rownames(DJI), '-\\d+-')
+mon = str_extract(mon, '\\d+')
+for (i in 1:(length(mon)-1)){
+  if (i == 1){
+    mon[i] = TRUE
+  }
+  if (mon[i] != mon[i+1]){
+    mon[i] = TRUE
+  }
+  else{
+    mon[i] = FALSE
+  }
+}
+mon = as.logical(mon)
+mon_tre = DJI[mon,]
+mon_tre = na.omit(mon_tre)
+for (i in 2:nrow(mon_tre)){
+  if (mon_tre[i,2] > mon_tre[i-1,2]){
+    mon_tre[i-1,1] = 'UP'
+  }
+  else{
+    mon_tre[i-1,1] = 'DOWN'
+  }
+}
+mon_tre = mon_tre[-nrow(mon_tre),]
+DJI = merge(DJI, mon_tre, all = TRUE, by = 0)[,-5]
+DJI[,1] = anydate(DJI[,1])
+
+count = 1
+for (i in 1:nrow(DJI)){
+  if ((DJI[i,1] <= DJI[i+1,1]) & is.na(DJI[i,4]) & (DJI[i,3] < as.numeric(mon_tre[count,2]))){
+    DJI[i,4] = 'UP'
+  } 
+  if((DJI[i,1] <= DJI[i+1,1]) & is.na(DJI[i,4]) & (DJI[i,3] > as.numeric(mon_tre[count,2]))){
+    DJI[i,4] = 'DOWN'
+  }
+  if(DJI[i,3] == as.numeric(mon_tre[count,2])){
+    count = count+1
+  }
+  if(count > nrow(mon_tre)){
+    break
+  }
+}
+DJI = cbind(DJI, lag(DJI_dict$Close, 1)[1:nrow(DJI)], lag(DJI_dict$Close, 7)[1:nrow(DJI)], lag(DJI_dict$Close, 20)[1:nrow(DJI)])
+colnames(DJI)[4] = 'next_month_position'
+
+# develop the attribute of DJI
+n = nrow(DJI)
+u<-rep(NA,n) # Empty vector 
+u<-(lag(DJI_dict$Close)-DJI_dict$Close)/DJI_dict$Close # daily percentage change of closing price 
+mu<-rep(NA,n) # Empty vector 
+sigma<-rep(NA,n) # Empty vector 
+for (iDate in 21:n){ # Pointer of date
+  mu[iDate]<-mean(DJI$Close[(iDate-20):iDate]) # mean of closing price in before 20 days
+  sigma[iDate]<-sd(DJI$Close[(iDate-20):iDate]) # standard deviation of closing price in recent 20 days
+}
+mos<-mu/sigma^2 # mean over sigma square
+DJI = cbind(DJI, mos)
+
+```
+
+
+volume, highest price, lowest price of DJI
+```{r}
+
+DJI_vol = data.frame(tseries::get.hist.quote(instrument="^DJI",'2010-1-1','2018-12-31', quote = 'Volume'))
+DJI_vol = apply(DJI_vol, 2, lag)
+DJI_high_low = tseries::get.hist.quote(instrument="^DJI",'2010-1-1','2018-12-31', quote = c('High', 'Low'))
+DJI_high_low = apply(DJI_high_low, 2, lag)
+DJI[,3] = lag(DJI[,3])
+DJI = cbind(DJI, DJI_vol, DJI_high_low)
+DJI = DJI[,-1]
+
+```
+
+
+
+
+
+other index's data include volume ,highest price, lowest price, open and closing price (GSPC, IXIC, RUT, VIX)
+note that data of VIX's volume doesn't exist
+lag the high, low, and close price 1 day after
+create a column contains $\frac{\mu}{\sigma^2}$ of the previous 20 days of each index
+```{r}
+GSPC = data.frame(tseries::get.hist.quote(instrument="^GSPC",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+IXIC = data.frame(tseries::get.hist.quote(instrument="^IXIC",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+RUT = data.frame(tseries::get.hist.quote(instrument="^RUT",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+VIX = data.frame(tseries::get.hist.quote(instrument="^VIX",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close")))
+index = cbind(GSPC, IXIC, RUT, VIX)
+close = Cl(index)
+u<-matrix(NA,nr=n,nc=ncol(close)) # Empty matrix 
+mu<-matrix(NA,nr=n,nc=ncol(close)) # Empty matrix
+sigma<-matrix(NA,nr=n,nc=ncol(close)) # Empty matrix
+mos<-matrix(NA,nr=n,nc=ncol(close)) # Empty matrix
+for (jStock in 1:ncol(close)){
+  u[,jStock]<-(lag(close[,jStock])-close[,jStock])/close[,jStock] # daily percentage of closing price in jStock 
+  for (iDate in 21:n){ # Pointer of date
+    mu[iDate,jStock]<-mean(close[(iDate-20):iDate,jStock]) # mean of closing price in before 20 days
+    sigma[iDate,jStock]<-sd(close[(iDate-20):iDate,jStock]) # standard deviation of closing price in recent 20 days
+  }
+  mos[,jStock]<-mu[,jStock]/sigma[,jStock]^2 # mean over sigma square
+}
+GSPC[,2:5] = apply(GSPC[,2:5], 2, lag)
+IXIC[,2:5] = apply(IXIC[,2:5], 2, lag)
+RUT[,2:5] = apply(RUT[,2:5], 2, lag)
+VIX[,2:4] = apply(VIX[,2:4], 2, lag)
+colnames(mos) = paste('mos', 1:4, sep = '_')
+index = cbind(GSPC, IXIC, RUT, VIX, mos)
+```
+
+
+
+
+The 30 stocks that include in DJI index
+some stocks may not be contained as they are already not in the index list and some new stock joined
+```{r}
+AAPL = data.frame(tseries::get.hist.quote(instrument="AAPL",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+AXP = data.frame(tseries::get.hist.quote(instrument="AXP",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+BA = data.frame(tseries::get.hist.quote(instrument="BA",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+CAT = data.frame(tseries::get.hist.quote(instrument="CAT",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+CSCO = data.frame(tseries::get.hist.quote(instrument="CSCO",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+CVX = data.frame(tseries::get.hist.quote(instrument="CVX",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+DIS = data.frame(tseries::get.hist.quote(instrument="DIS",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+GS = data.frame(tseries::get.hist.quote(instrument="GS",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+HD = data.frame(tseries::get.hist.quote(instrument="HD",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+IBM = data.frame(tseries::get.hist.quote(instrument="IBM",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+INTC = data.frame(tseries::get.hist.quote(instrument="INTC",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+JNJ = data.frame(tseries::get.hist.quote(instrument="JNJ",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+JPM = data.frame(tseries::get.hist.quote(instrument="JPM",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+KO = data.frame(tseries::get.hist.quote(instrument="KO",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+MCD = data.frame(tseries::get.hist.quote(instrument="MCD",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+MMM = data.frame(tseries::get.hist.quote(instrument="MMM",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+MRK = data.frame(tseries::get.hist.quote(instrument="MRK",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+MSFT = data.frame(tseries::get.hist.quote(instrument="MSFT",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+NKE = data.frame(tseries::get.hist.quote(instrument="NKE",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+PFE = data.frame(tseries::get.hist.quote(instrument="PFE",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+NKE = data.frame(tseries::get.hist.quote(instrument="NKE",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+PG = data.frame(tseries::get.hist.quote(instrument="PG",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+TRV = data.frame(tseries::get.hist.quote(instrument="TRV",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+UNH = data.frame(tseries::get.hist.quote(instrument="UNH",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+UTX = data.frame(tseries::get.hist.quote(instrument="UTX",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+VZ = data.frame(tseries::get.hist.quote(instrument="VZ",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+WBA = data.frame(tseries::get.hist.quote(instrument="WBA",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+WMT = data.frame(tseries::get.hist.quote(instrument="WMT",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+XOM = data.frame(tseries::get.hist.quote(instrument="XOM",'2010-1-1','2018-12-31', quote = c("Open", "High", "Low", "Close", "Volume")))
+stock = cbind.data.frame(AAPL, AXP, BA, CAT, CSCO, CVX, DIS, GS, HD, IBM, INTC, JNJ, JPM, KO, MCD, MMM, MRK, MSFT, NKE, PFE, PG, TRV, UNH, UTX, VZ, WBA, WMT, XOM)
+
+open = Op(stock)
+close = Cl(stock)
+low = Lo(stock)
+high = Hi(stock)
+volume = Vo(stock)
+u<-matrix(NA,nr=n,nc=ncol(close)) # Empty matrix 
+mu<-matrix(NA,nr=n,nc=ncol(close)) # Empty matrix
+sigma<-matrix(NA,nr=n,nc=ncol(close)) # Empty matrix
+mos<-matrix(NA,nr=n,nc=ncol(close)) # Empty matrix
+for (jStock in 1:ncol(close)){
+  u[,jStock]<-(lag(close[,jStock])-close[,jStock])/close[,jStock] # daily percentage of closing price in jStock 
+  for (iDate in 21:n){ # Pointer of date
+    mu[iDate,jStock]<-mean(close[(iDate-20):iDate,jStock]) # mean of closing price in before 20 days
+    sigma[iDate,jStock]<-sd(close[(iDate-20):iDate,jStock]) # standard deviation of closing price in recent 20 days
+  }
+  mos[,jStock]<-mu[,jStock]/sigma[,jStock]^2 # mean over sigma square
+}
+colnames(mos) = paste('mos', 1:ncol(mos), sep = '_')
+close = apply(Cl(stock), 2, lag)
+high = apply(Hi(stock), 2, lag)
+low = apply(Lo(stock), 2, lag)
+volume = apply(Vo(stock), 2 ,lag)
+stock = cbind.data.frame(open, close, high, low, volume, mos)
+```
+
+
+
+combine all df together and omit all NAs
+remove todays close price since we cannot get today's close price in reality
+```{r}
+DJI_df = cbind(DJI, index, stock, deparse.level = 1)
+DJI_df = na.omit(DJI_df)
+DJI_df$next_month_position = as.factor(DJI_df$next_month_position)
+
+```
+
+
+scale the data by the formula $x'=\frac{x-min}{max-min}$
+```{r}
+scaled_DJI = DJI_df
+for (i in 1:2) scaled_DJI[,i] = (DJI_df[,i]-min(DJI_df[,i]))/(max(DJI_df[,i])-min(DJI_df[,i]))
+for (i in 4:ncol(scaled_DJI)) scaled_DJI[,i] = (DJI_df[,i]-min(DJI_df[,i]))/(max(DJI_df[,i])-min(DJI_df[,i]))
+scaled_DJI = na.omit(scaled_DJI)
+```
+
+
+copy the ANN for loop from lecture notes
+```{r}
+ann<-function(x,y,size,maxit=100,linout=F,try=10, MaxNWts =1000000) {
+ann1<-nnet(y~.,data=x,size=size,maxit=maxit,linout=linout, MaxNWts =1000000)
+v1<-ann1$value # save the value for the first trial
+for (i in 2:try) {
+ann<-nnet(y~.,data=x,size=size,maxit=maxit,linout=linout, MaxNWts =1000000)
+if (ann$value<v1) { # check if the current value is better
+v1<-ann$value # save the best value
+ann1<-ann # save the results
+}
+}
+ann1 # return the results
+}
+```
+
+a demo that listed in the report
+showing that how good is the data fit in the classification problem
+```{r}
+ann_size11_demo = ann(scaled_DJI[,-3], scaled_DJI[,3] , size = 11, maxit = 200, try = 2)
+pred = ifelse(ann_size11_demo$fit > 0.5, 'Up', 'Down')
+tab = table(pred, scaled_DJI[,3])
+(tab[1,1] + tab[2,2])/(tab[1,1] + tab[1,2] + tab[2,1] + tab[2,2])
+summary(ann_size11_demo)
+```
+
+seperate train and test data
+the reason of defining 1:201 is to solve the bug from R
+```{r}
+test = sample(1:nrow(DJI), nrow(DJI)*0.2)
+test_x = na.omit(scaled_DJI[test,(1:201)])
+train_x = na.omit(scaled_DJI[-test,(1:201)])
+
+```
+
+A demo of ANN predicting ability on classification problem
+and the a ROC curve is ploted
+AUC is also found
+```{r}
+ann_size11_demo = ann(train_x[,-3], train_x[,3] , size = 11, maxit = 200, try = 2)
+pred_freq = predict(ann_size11_demo, test_x)
+pred = ifelse(pred_freq > 0.5, 'Up', 'Down')
+tab = table(pred, test_x[,3])
+(tab[1,1] + tab[2,2])/(tab[1,1] + tab[1,2] + tab[2,1] + tab[2,2])
+pred_wif_pred = prediction(pred_freq, test_x[,3])
+roc = performance(pred_wif_pred, 'tpr', 'fpr')
+plot(roc, colorize = T, main = 'ROC Curve')
+auc = performance(pred_wif_pred, 'auc')
+auc = unlist(slot(auc, 'y.values'))
+auc = round(auc, 4)
+legend(0.6, 0.2, auc, title = 'AUC')
+```
+
+
+a function that find the best performed ANN on each size of hidden layer
+confusion matrix of the best model of that particular size of hidden will be return
+the respective distribution and accuracy and all accuracy during the model selection will also be include
+
+```{r}
+max_accruacy_ann = function(x,y,size,maxit=100,linout=F, test_x, try, MaxNWts =1000000) {
+    ann_min = nnet(y~.,data=x,size=size,maxit=maxit,linout=linout, MaxNWts =1000000)
+    best_pred = predict(ann_min, test_x)
+    pred4tab = ifelse(best_pred > 0.5, 'Up', 'Down')
+    tab = table(pred4tab, test_x[,3])
+    accruacy = sum(diag(tab))/sum(tab)
+    cum_acc = c(accruacy)
+    for (i in 2:try){
+      ann_min = nnet(y~.,data=x,size=size,maxit=maxit,linout=linout, MaxNWts =1000000)
+      pred = predict(ann_min, test_x)
+      pred4tab = ifelse(pred > 0.5, 'Up', 'Down')
+      tab_new = table(pred4tab, test_x[,3])
+      accruacy_new = sum(diag(tab_new))/sum(tab_new)
+      cum_acc = append(cum_acc, accruacy_new)
+      if (accruacy < accruacy_new){
+        accruacy = accruacy_new
+        best_pred = pred
+        tab = tab_new
+    }
+    }
+    return(list(tab, best_pred, accruacy, cum_acc))
+}
+```
+
+train the model and find the variance, maximum, minimum, q1, q2, q3 of the accruacy of each size of hidden layer
+an accuracy table will be produce
+```{r}
+classification = list()
+for (i in 2:4){
+  classification[[i]] = max_accruacy_ann(train_x[,-3], train_x[,3] , size = i, maxit = 200, try = 12, test_x = test_x)
+  
+}
+cum_accruacy = list()
+for (i in 2:4) cum_accruacy[i-1] = as.vector(classification[[i]][4])
+acc_mat = matrix(NA, ncol = 11, nrow = 7)
+for(i in 1:3) acc_mat[,i] = rbind(mean(cum_accruacy[[i]]),
+  var(cum_accruacy[[i]]),
+  max(cum_accruacy[[i]]),
+  min(cum_accruacy[[i]]),
+  quantile(cum_accruacy[[i]], 0.25),
+  median(cum_accruacy[[i]]),
+  quantile(cum_accruacy[[i]], 0.75))
+  rownames(acc_mat) = c('mean', 'var', 'max', 'min', 'q1', 'q2', 'q3')
+  colnames(acc_mat) = paste('size', 2:12, sep = '_')
+  write.csv(acc_mat, file = paste0(working_dir, 'accruacy_table.csv'))
+
+  
+```
+
+
+Data will be use for predict the actual price
+Basically there is no difference
+same process with the initial approach
+split the data into train and test data
+
+```{r}
+DJI = merge(DJI_dict, mon_tre, all = TRUE, by = 0)[,-4]
+for (i in 1:(nrow(DJI_dict)-1)){
+  if ((DJI[i,1] < DJI[i+1,1]) & is.na(DJI[i+1,4])){
+    DJI[i+1,4] = DJI[i,4]
+  }
+}
+colnames(DJI)[4] = 'end_of_month_price'
+DJI = cbind(DJI, lag(DJI_dict$Close, 1)[1:nrow(DJI)], lag(DJI_dict$Close, 7)[1:nrow(DJI)], lag(DJI_dict$Close, 20)[1:nrow(DJI)])
+DJI = cbind(DJI, mos, DJI_vol, DJI_high_low)
+DJI_df = cbind(DJI, index, stock, deparse.level = 1)
+DJI_df = na.omit(DJI_df)
+DJI_df = DJI_df[,c(-1,-3)]
+scaled_DJI = DJI_df
+for (i in 1:ncol(scaled_DJI)) scaled_DJI[,i] = (DJI_df[,i]-min(DJI_df[,i]))/(max(DJI_df[,i])-min(DJI_df[,i]))
+for (i in 3:ncol(scaled_DJI)) scaled_DJI[,i] = (DJI_df[,i]-min(DJI_df[,i]))/(max(DJI_df[,i])-min(DJI_df[,i]))
+scaled_DJI = na.omit(scaled_DJI)
+train = 1:round(nrow(scaled_DJI)*0.8)
+test_x = scaled_DJI[-train,]
+train_x = scaled_DJI[train,]
+
+```
+
+setup a for loop to figure our the least error model
+```{r}
+min_error_ann = function(x,y,size,maxit=100,linout=F, test_x, try, MaxNWts =1000000) {
+    ann_min = nnet(y~.,data=x,size=size,maxit=maxit,linout=linout, MaxNWts =1000000)
+    best_pred = predict(ann_min, test_x)
+    error = sum(abs(best_pred - test_x[,2]))
+    cum_error = c(error)
+    for (i in 2:try){
+      ann_min = nnet(y~.,data=x,size=size,maxit=maxit,linout=linout, MaxNWts =1000000)
+      pred_price = predict(ann_min, test_x)
+      error_new = sum(abs(pred_price - test_x[,2]))
+      cum_error = append(cum_error, error_new)
+    if (error_new < error){
+      error = error_new
+      best_pred = pred_price
+    }
+    }
+    return(list(error, cum_error, best_pred))
+}
+
+
+
+```
+
+
+a demo on show how good fit is the data on predicting the actual price
+```{r}
+ann_price_fit_performance = ann(scaled_DJI[,-2], scaled_DJI[,2] , size = 2, maxit = 200, try = 5, linout = T)
+fit = predict(ann_price_fit_performance, scaled_DJI)
+error = sum(abs(fit - scaled_DJI[,2]))
+unstand = function(x_dash){
+  x = x_dash*(max(DJI_df[,2])-min(DJI_df[,2]))+min(DJI_df[,2])
+  return(x)
+}
+stand_price = unstand(error)
+plot(scaled_DJI[,2], type = 'l', ylab = 'actual index', xlab = 'time')
+lines(fit, col = 'red')
+```
+
+
+Again, similar approach
+set up a for loop to find the distribution of the error 
+an error.csv will be produce
+
+```{r}
+compare_list = list()
+for (i in 2:4) compare_list[[i]] = min_error_ann(train_x[,-2], train_x[,2] , size = i, maxit = 12, try = 10, linout = TRUE, test_x = test_x)
+cum_error = matrix(NA, nrow = 50, ncol = 11)
+for (i in 2:4) cum_error[,(i-1)] = cbind(compare_list[[i]][[2]])
+err_mat = matrix(NA, ncol = 11, nrow = 7)
+for(i in 1:3) err_mat[,i] = rbind(mean(cum_error[,i]),
+  var(cum_error[,i]),
+  max(cum_error[,i]),
+  min(cum_error[,i]),
+  quantile(cum_error[,i], 0.25),
+  median(cum_error[,i]),
+  quantile(cum_error[,i], 0.75))
+  rownames(err_mat) = c('mean', 'var', 'max', 'min', 'q1', 'q2', 'q3')
+  colnames(err_mat) = paste('size', 2:12, sep = '_')
+  write.csv(err_mat, file = paste0(working_dir, 'error_table.csv'))
+  
+```
+
+
+unstandardize the data by $x=x'(max-min)+min$
+the below code choose the the predicted price of a size 2 layer
+```{r}
+unstand = function(x_dash){
+  x = x_dash*(max(DJI_df[,2])-min(DJI_df[,2]))+min(DJI_df[,2])
+  return(x)
+}
+un_pred_price = unstand(compare_list[[2]][[3]])
+un_actual_price = unstand(test_x[,2])
+compare = cbind.data.frame(un_pred_price, un_actual_price)
+par(mfrow = c(1,2))
+plot(un_actual_price, type = 'l')
+plot(un_pred_price, , type = 'l', col = 'red')
+
+```
+
+If you are using R-studio, please press ctrl+F, 
+type 2000 find section, and then replace it by 2010
+Same approach as before, the only difference is the data
+the result can be reproduce with the same code
+
