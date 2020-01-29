@@ -1,3 +1,3 @@
 # Wing-Ryan-CHENG
 
-This is the repository for my project. 
+Yes, you get into the right link
