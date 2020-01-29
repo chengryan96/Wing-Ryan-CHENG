@@ -1,0 +1,420 @@
+---
+title: "STAT4001Q2"
+output: html_notebook
+---
+
+read data 
+```{r setup, include=FALSE}
+work_dir = 'C:/Users/s1155102964/Desktop/hw/STAT4001/pj/'
+Titanic <- data.frame(read.csv(paste0(work_dir,'Titanic.csv')))
+```
+
+Set seed
+```{r}
+set.seed(4001)
+```
+
+
+parallel processing
+```{r}
+library('doParallel')
+clust = makeCluster(detectCores())
+registerDoParallel(clust)
+getDoParWorkers()
+```
+import required library
+```{r}
+library(MASS)
+library(caret)
+library(tree)
+library(rpart)
+library(rfUtilities)
+library(randomForest)
+library(e1071)
+library(nnet)
+library(plsVarSel)
+```
+
+
+data structure
+```{r}
+str(Titanic)
+plot(Titanic)
+Titanic$Sex <- unclass(Titanic$Sex)
+Titanic$Embarked <- unclass(Titanic$Embarked)
+x <- cor(na.omit(Titanic))
+summary(Titanic)
+```
+
+
+use boosting to fillin the missing data
+```{r}
+NAage = Titanic[is.na(Titanic$Age), ]
+subage = Titanic[!is.na(Titanic$Age), ]
+numfolds = trainControl( method = "cv", number = 10)
+na_gbm = train(Age ~ . ,
+               data = subage,
+               method = 'gbm', 
+               trControl = numfolds
+               )
+pred_age <- predict(na_gbm, NAage)
+NAage$Age = round(as.numeric(pred_age))
+df = rbind(subage, NAage)
+tin = df
+
+```
+convert the data type
+
+```{r}
+
+df = df[,-1]
+df[,1] = as.factor(df[,1])
+df[,2] = as.factor(df[,2])
+
+```
+
+train data and test data 
+```{r}
+tin = df
+train = sample(nrow(Titanic), nrow(Titanic)*0.8)
+tin_train = tin[train,]
+tin_test = tin[-train,]
+```
+
+
+
+KNN
+we expected it doesn't fit well as it is 10 dim seems too much for it
+Please standarize it and do it again in a new section and see what improvement it will have
+```{r}
+train_control = trainControl(method  = "CV")
+KNN_tai = train(Survived ~ ., 
+             method     = "knn",
+             tuneGrid   = expand.grid(k = 1:50),
+             trControl  = train_control,
+             metric     = "Accuracy",
+             data       = tin_train)
+
+KNN_tai
+summary(KNN_tai)
+pred_knn = predict(KNN_tai, tin_test)
+tab = table(pred_knn, tin_test$Survived)
+acc = sum(diag(tab))/sum(tab)
+```
+prob = 0.662
+KAPPA = 0.175
+
+logistic
+```{r}
+RMSE = c()
+tin4log = tin
+tin4log$Survived = as.numeric(tin4log$Survived)-1
+tin4log_train = tin4log[train,]
+tin4log_test = tin4log[-train,]
+for (i in 1:10){
+s = sample(nrow(tin4log_train), 400*0.9)
+log_first = glm(Survived ~ ., data = tin4log_train[s,], family = binomial)
+pred = as.vector(predict(log_first, tin4log_train[s,], type = 'response'))
+
+RMSE[i] = sqrt(mean((pred - tin4log_train[s,1])^2))
+}
+RMSE = data.frame(RMSE)
+row.names(RMSE) = paste0(1:10, ' set of cross validation')
+#model selection
+log_first = glm(Survived ~ ., data = tin_train[s,], family = binomial)
+summary(log_first)
+#accuarcy
+pred_first = predict(log_first, tin4log_test, type = 'response')
+pred_first = as.vector(ifelse(pred_first > 0.5, 1, 0))
+tab = table(pred_first, tin4log_test$Survived)
+sum(diag(tab))/sum(tab)
+
+###ROC part Full model
+train_control = trainControl(method = "cv", number = 10)
+log_tin = train(Survived ~ .,
+               data = tin_train,
+               trControl = train_control,
+               method = "glm",
+               family=binomial())
+summary(log_tin)
+log_pred = predict(log_tin, tin_test)
+tab = table(log_pred, tin_test[,1])
+sum(diag(tab))/sum(tab)
+
+#Model performance Evaluation
+library(ROCR)
+pred <- predict(log_tin, tin_test, type = "prob")
+pred <- prediction(pred$`1`, tin_test$Survived)
+eval <- performance(pred, "acc")
+plot(eval)
+abline(h = 0.91, col="red")
+abline(v=0.635)
+abline(v=0.67)
+
+#Identify Best Values
+max <- which.max(slot(eval, "y.values")[[1]])
+acc <- slot(eval, "y.values")[[1]][max]
+cut <- slot(eval, "x.values")[[1]][max]
+print(c(Accuracy=acc, Cutoff=cut))
+
+#ROC
+roc <- performance(pred, "tpr", "fpr")
+plot(roc, colorize=T, main = "ROC Curve")
+abline(a=0, b=1)
+
+#AUC
+auc <- performance(pred, "auc")
+auc <- unlist(slot(auc, "y.values"))
+auc <- round(auc, 4)
+legend(.6, .2, auc, title = "AUC", cex = 0.8)
+
+#New cut off
+log_pred = predict(log_tin, tin_test, type = "prob")
+new_pred <- NULL
+for(i in 1:nrow(log_pred)){
+  if(log_pred$`1`[i] > cut){
+    new_pred <- c(new_pred, 1)
+  }
+  else{
+    new_pred <- c(new_pred, 0)
+  }
+}
+table(new_pred, tin_test$Survived)
+
+#improve the model by AIC
+step(log_first)
+log_second = glm(Survived ~ Pclass + Sex + Age + SibSp, data = tin4log_train, family = binomial)
+summary(log_second)
+RMSE = c()
+for (i in 1:10){
+s = sample(nrow(tin4log_train), 400*0.9)
+log_second = glm(Survived ~ Pclass + Sex + Age + SibSp + Embarked, data = tin4log_train[s,], family = binomial)
+pred = predict(log_second, tin4log_train[s,], type = 'response')
+RMSE[i] = sqrt(mean((pred - tin4log_train[s,1])^2))
+}
+RMSE = data.frame(RMSE)
+row.names(RMSE) = paste0(1:10, ' set of cross validation')
+pred_second = predict(log_second, tin4log_test, type = 'response')
+pred_second = as.vector(ifelse(pred_second > 0.5, 1, 0))
+tab = table(pred_second, tin4log_test$Survived)
+sum(diag(tab))/sum(tab)
+
+#ROC in the improved moethod
+train_control = trainControl(method = "cv", number = 10)
+log_tin_second = train(Survived ~ Pclass + Sex + Age + SibSp,
+               data = tin_train,
+               trControl = train_control,
+               method = "glm",
+               family=binomial())
+summary(log_tin_second)
+log_pred = predict(log_tin_second, tin_test)
+tab = table(log_pred, tin_test[,1])
+sum(diag(tab))/sum(tab)
+###########################################################################################
+#Model performance Evaluation
+pred <- predict(log_tin_second, tin_test, type = "prob")
+pred <- prediction(pred$`1`, tin_test$Survived)
+eval <- performance(pred, "acc")
+plot(eval)
+abline(h = 0.91, col="red")
+abline(v=0.635)
+abline(v=0.67)
+
+#Identify Best Values
+max <- which.max(slot(eval, "y.values")[[1]])
+acc <- slot(eval, "y.values")[[1]][max]
+cut <- slot(eval, "x.values")[[1]][max]
+print(c(Accuracy=acc, Cutoff=cut))
+
+#ROC
+
+roc <- performance(pred, "tpr", "fpr")
+plot(roc, colorize=T, main = "ROC Curve")
+abline(a=0, b=1)
+
+#AUC
+auc <- performance(pred, "auc")
+auc <- unlist(slot(auc, "y.values"))
+auc <- round(auc, 4)
+legend(.6, .2, auc, title = "AUC", cex = 0.8)
+
+#New cut off
+log_pred = predict(log_tin, tin_test, type = "prob")
+new_pred <- NULL
+for(i in 1:nrow(log_pred)){
+  if(log_pred$`1`[i] > cut){
+    new_pred <- c(new_pred, 1)
+  }
+  else{
+    new_pred <- c(new_pred, 0)
+  }
+}
+table(new_pred, tin_test$Survived)
+
+```
+
+classification tree
+```{r}
+tree_tai = tree(Survived ~ ., data = tin_train)
+summary(tree_tai)
+plot(tree_tai)
+text(tree_tai, cex = 0.7, pretty = 0)
+pred = predict(tree_tai, tin_test, type = 'class')
+tab = table(pred, tin_test$Survived)
+sum(diag(tab))/sum(tab)
+cv_tai = cv.tree(tree_tai, FUN = prune.misclass)
+plot(cv_tai, main = 'misclassification error on 10 cv points')
+par(mfrow=c(1,2))
+plot(cv_tai$size,cv_tai$dev,type="b", ylab = 'deviation')
+plot(cv_tai$k,cv_tai$dev,type = "b")
+accuracy_mat = list()
+for (i in c(2, 3, 5)) accuracy_mat[[i]] = predict(prune.misclass(tree_tai, best = i), tin_test, type="class")
+tab_2 = table(accuracy_mat[[2]], tin_test$Survived)
+sum(diag(tab_2))/sum(tab_2)
+tab_3 = table(accuracy_mat[[3]], tin_test$Survived)
+sum(diag(tab_3))/sum(tab_3)
+tab_5 = table(accuracy_mat[[5]], tin_test$Survived)
+sum(diag(tab_5))/sum(tab_5)
+tree_best = prune.misclass(tree_tai, best = 5)
+plot(prune.misclass(tree_tai, best = 4))
+text(tree_tai, cex = 0.7, pretty = 1, all=TRUE)
+for (i in c(2, 3, 5)) {
+  plot(prune.misclass(tree_tai, best = i) , main = paste('classification tree of size ', i, sep = ' '))
+  text(prune.misclass(tree_tai, best = i), cex = 0.7, pretty=0)
+}
+```
+
+random forest
+```{r}
+rf_list = list()
+acc = c()
+
+control <- trainControl(method="repeatedcv", number=10, repeats=3, search="random")
+rf_random <- train(Survived~., data=tin_train, method="rf", tuneLength=15, trControl=control)
+plot(rf_random)
+for(i in 1:7){
+  rf_list[[i]] = randomForest(Survived~., data = tin, subset=train, mtry= i, ntree = 350, importance = TRUE)
+}
+pred = predict(rf_list[[3]], tin_test)
+tab = table(pred, tin_test$Survived)
+sum(diag(tab))/sum(tab)
+pred = predict(rf_list[[4]], tin_test)
+tab = table(pred, tin_test$Survived)
+sum(diag(tab))/sum(tab)
+
+```
+
+lda
+```{r}
+#cross validation report
+acc = c()
+for (i in 1:10){
+s = sample(nrow(tin_train), 400*0.9)
+lda = lda(Survived~., data=tin_train[s,])
+pred = predict(lda, tin_train[s,])
+tab = table(pred$class, tin_train[s,1])
+acc[i] = sum(diag(tab))/sum(tab)
+}
+acc = as.data.frame(acc)
+rownames(acc) = paste0('Accuracy of the ', 1:10, ' folds')
+trCtrl = trainControl(method = "cv", number = 10)
+fit = train(Survived~., data=tin_train, method="lda", 
+                trControl = trCtrl, metric = "Accuracy")
+fit$finalModel
+
+
+pred = predict(fit, tin_test)
+lda_pred = predict(fit, tin_test)
+tab = table(pred, tin_test$Survived)
+sum(diag(tab))/sum(tab)
+for (i in 1:ncol(tin_train)) qqnorm(as.numeric(tin_train[,i]))
+```
+
+
+gradient boosting
+```{r}
+
+set.seed(4001)
+caretGrid <- expand.grid(interaction.depth=c(1, 3, 5), 
+                         n.trees = (0:50)*50,
+                         shrinkage=c(0.01, 0.001),
+                         n.minobsinnode=10)
+metric <- "Accuracy"
+numfolds = trainControl( method = "cv", number = 10)
+cv_gbm = train(Survived ~ .,
+               data = tin_train,
+               method = 'gbm', 
+               trControl = numfolds,
+               tuneGrid=caretGrid,
+               metric = metric)
+summary(cv_gbm)
+plot(cv_gbm)
+
+set.seed(4001)
+pred <- predict(cv_gbm, tin_test)
+cbind(pred, tin_test$Survived)
+plot(pred, xlab="Prediction", ylab="Freq", main="GBM Result")
+table(pred, tin_test[,1])
+
+#Model performance Evaluation
+library(ROCR)
+pred <- predict(cv_gbm, tin_test, type = "prob")
+pred <- prediction(pred$`1`, tin_test$Survived)
+eval <- performance(pred, "acc")
+plot(eval)
+abline(h = acc, v=cut, col="red")
+
+
+#Identify Best Values
+max <- which.max(slot(eval, "y.values")[[1]])
+acc <- slot(eval, "y.values")[[1]][max]
+cut <- slot(eval, "x.values")[[1]][max]
+print(c(Accuracy=acc, Cutoff=cut))
+
+#ROC
+#pred <- prediction(pred$`1`, tin_test$Survived)
+roc <- performance(pred, "tpr", "fpr")
+plot(roc, colorize=T, main = "ROC Curve")
+abline(a=0, b=1)
+
+#AUC
+auc <- performance(pred, "auc")
+auc <- unlist(slot(auc, "y.values"))
+auc <- round(auc, 4)
+legend(.6, .2, auc, title = "AUC", cex = 0.8)
+
+#New cut off
+log_pred = predict(log_tin, tin_test, type = "prob")
+new_pred <- NULL
+for(i in 1:nrow(log_pred)){
+  if(log_pred$`1`[i] > cut){
+    new_pred <- c(new_pred, 1)
+  }
+  else{
+    new_pred <- c(new_pred, 0)
+  }
+}
+table(new_pred, tin_test$Survived)
+```
+
+svm
+```{r}
+
+library(e1071)
+
+svmfit <- svm(Survived ~ .,data = tin_train, type = 'C-classification',kernel="radial", cost=1)
+print(svmfit)
+
+
+set.seed(4001)
+tuned <- tune(svm,Survived ~ .,data = tin_train, ranges = list(cost=c(.01,.1,1,10,100,1000,10000)))
+summary(tuned)
+tuned$best.model
+
+pred <- predict(svmfit, tin_test)
+plot(pred, xlab="Prediction", ylab="Freq", main="SVM Result")
+table(pred, tin_test[,1])
+
+
+```
+

@@ -1,0 +1,352 @@
+---
+title: "STAT4001Q1"
+output: html_notebook
+---
+
+
+read data 
+```{r setup, include=FALSE}
+work_dir = 'C:\\Users\\s1155102964\\Desktop\\hw\\STAT4001\\pj\\'
+house <- data.frame(read.csv(paste0(work_dir,'House.csv')))
+```
+
+
+parallel processing
+```{r}
+library('doParallel')
+clust = makeCluster(detectCores())
+registerDoParallel(clust)
+getDoParWorkers()
+```
+
+data structure
+```{r}
+str(house)
+plot(house)
+house$LotShape <- unclass(house$LotShape)
+x <- cor(na.omit(house))
+summary(house)
+```
+
+install required package
+```{r}
+library(caret)
+library(pls)
+library(plsdof)
+library(rpart)
+library(splines)
+library(mgcv)
+library(MASS)
+library(tree)
+library(glmnet)
+library(MASS)
+library(tidyverse)
+library(leaps)
+library(ISLR)
+library(boot)
+```
+
+approach 1
+first clear the missing data
+```{r}
+NAhouse <- house[is.na(house$LotFrontage), -1] 
+subhouse <- house[!is.na(house$LotFrontage), -1]
+#fit it with linear regression
+lin_reg_NA = lm(LotFrontage ~ ., data = subhouse)
+summary(lin_reg_NA)
+#use AIC to improve the model
+AICNAhouse = step(lin_reg_NA, k = 2)
+names(AICNAhouse$coefficients)
+#refit the linear regression model
+lin_reg_NA = lm(LotFrontage ~ LotArea + LotShape + X2ndFlrSF + GrLivArea + TotRmsAbvGrd + GarageArea + WoodDeckSF, data = subhouse)
+summary(lin_reg_NA)
+miss = round(predict(lin_reg_NA, NAhouse))
+#R^2 = 0.3265, not fitting well, try pcr
+#for LotFrontage
+#sub the pridiction reuslt into the original data
+#sub the predicted data to replace NA
+house[is.na(house$LotFrontage), 2] = miss
+#for id235-MasVnrArea same method
+no_235 <- house[-235, -1]
+only235 <- house[235, -1]
+lin_reg_NA = lm(MasVnrArea ~ ., data = no_235)
+summary(lin_reg_NA)
+MAS235 = round(predict(lin_reg_NA, only235))
+house[is.na(house$MasVnrArea), 6] = MAS235
+#can someone help me to round it?
+
+```
+
+```{r}
+set.seed(4001)
+train = sample(nrow(house), size = nrow(house) * 0.8)
+house_train = house[train,-1]
+house_test = house[-train,-1]
+```
+
+
+
+Linear regression
+```{r}
+
+#cross validation 
+set.seed(10)
+RMSE <- c()
+for (i in 1:10){
+s = sample(nrow(house_train), 400*0.9)
+train <- house_train[s,]
+test <- house_train[-s,]
+lin_reg = lm(SalePrice ~ ., data = train)
+pred = predict(lin_reg, test)
+RMSE[i] = sqrt(mean((pred - test$SalePrice)^2))
+}
+RMSE = as.data.frame(RMSE)
+rownames(RMSE) = paste('RMSE of ', 1:10, ' st folds')
+
+# Fit the full model 
+lin_reg <- lm( SalePrice ~ ., data = house_train)
+# Stepwise regression model
+step.model <- stepAIC(lin_reg, direction = "both",trace = FALSE)
+summary(step.model)
+models <- regsubsets(SalePrice~., data = house_train, nvmax = 5,method = "seqrep")
+summary(models)
+set.seed(123)
+# Set up repeated k-fold cross-validation
+train.control <- trainControl(method = "cv", number = 10)
+# Train the model
+step.model <- train(SalePrice ~., data =house_train,method = "leapBackward", tuneGrid = data.frame(nvmax = 1:5),trControl = train.control)
+step.model$results
+step.model$bestTune
+summary(step.model$finalModel)
+coef(step.model$finalModel, 4)
+lm(SalePrice ~ TotalBsmtSF + X1stFlrSF + X2ndFlrSF + GarageArea, data = house_train)
+
+
+```
+
+
+Ridge
+```{r}
+library(glmnet)
+x = model.matrix(SalePrice ~ . , house_train)
+y = house_train$SalePrice
+grid = 10^seq(10,-2,length=100)
+grid
+ridge.mod = glmnet(x,y,alpha = 0, lambda = grid)
+dim(coef(ridge.mod))
+#coef 50 lamda middle
+ridge.mod$lambda[50]
+coef(ridge.mod)[,50]
+sqrt(sum(coef(ridge.mod)[c(-1,-2),50]^2))
+#coef 20 lamda big
+ridge.mod$lambda[20]
+coef(ridge.mod)[,20]
+sqrt(sum(coef(ridge.mod)[c(-1,-2),20]^2))
+#Obtain ridge regression coef for new value of lambda = 20
+predict(ridge.mod,s=20,type="coefficients")
+#test data
+testData = model.matrix(SalePrice ~ . , house_test)
+#predict test 1
+ridge.pred1=predict(ridge.mod,s=4,newx=testData)
+cbind(house_test$SalePrice, ridge.pred1)
+RSS = sum((ridge.pred1 - house_test$SalePrice)^(2))
+MSE = RSS/nrow(house_test)
+RMSE = sqrt(MSE)
+#predict test 2
+ridge.pred2=predict(ridge.mod,s=0,newx=testData)
+cbind(house_test$SalePrice, ridge.pred2)
+RSS = sum((ridge.pred2 - house_test$SalePrice)^(2))
+MSE = RSS/nrow(house_test)
+RMSE = sqrt(MSE)
+#predict test 3
+ridge.pred3=predict(ridge.mod,s=1e10,newx=testData)
+cbind(house_test$SalePrice, ridge.pred3)
+RSS = sum((ridge.pred3 - house_test$SalePrice)^(2))
+MSE = RSS/nrow(house_test)
+RMSE = sqrt(MSE)
+#Plot MSE
+set.seed(1234)
+cv.out = cv.glmnet(x, y, alpha=0)
+plot(cv.out)
+#best lambda
+bestlam = cv.out$lambda.min
+bestlam
+#best model
+ridge.pred = predict(ridge.mod, s=bestlam, newx = testData)
+cbind(house_test$SalePrice, ridge.pred)
+RSS = sum((ridge.pred - house_test$SalePrice)^(2))
+MSE = RSS/nrow(house_test)
+RMSE = sqrt(MSE)
+#Full Data model
+Fullx = model.matrix(SalePrice ~ . , house[,-1])
+Fully = house$SalePrice
+out=glmnet(Fullx, Fully, alpha = 0)
+predict(out, type = "coefficients", s=bestlam)[1:17]
+
+```
+Lasso
+```{r}
+library(glmnet)
+x = model.matrix(SalePrice ~ . , house_train)
+y = house_train$SalePrice
+grid = 10^seq(10,-2,length=100)
+#1st model
+lasso.mod=glmnet(x, y, alpha=1, lambda=grid)
+names(lasso.mod$beta[,100])
+#plot(lasso.mod, xvar="lambda")
+#lbs_fun(lasso.mod)
+
+par(mfrow=c(1,2))
+plot(lasso.mod, "norm", label = TRUE)
+plot(lasso.mod, "lambda", label = TRUE)
+par(mfrow=c(1,1))
+#cross validation
+set.seed(1155093869)
+cv.out=cv.glmnet(x, y, alpha=1)
+plot(cv.out)
+#best lambda
+bestlam2=cv.out$lambda.min
+bestlam2
+#test data
+testData = model.matrix(SalePrice ~ . , house_test)
+#best model
+lasso.pred = predict(lasso.mod, s=bestlam2, newx = testData)
+cbind(house_test$SalePrice, lasso.pred)
+RSS = sum((lasso.pred - house_test$SalePrice)^(2))
+MSE = RSS/nrow(house_test)
+RMSE = sqrt(MSE)
+#Full data and the coefficient
+Fullx = model.matrix(SalePrice ~ . , house[,-1])
+Fully = house$SalePrice
+out=glmnet(Fullx, Fully, alpha = 1, lambda = grid)
+lasso.coef=predict(out, type = "coefficients", s=bestlam)
+```
+
+spline
+```{r}
+#first plot the graph
+plot(house$SalePrice)
+plot(house$LotFrontage)
+#seperate the knots
+spline_reg <- lm(SalePrice ~bs(LotFrontage, knots=quantile(house$SalePrice, p=c(0.25,0.5,1))) + bs(LotArea, knots=quantile(house$SalePrice, p=c(0.2,0.4,1))) + bs(MasVnrArea, knots=quantile(house$SalePrice, p=c(0.05,0.25,0.75,1))) + bs(TotalBsmtSF, knots=quantile(house$SalePrice, p=c(0.15,0.7,1))) + bs(X1stFlrSF, knots=quantile(house$SalePrice, p=c(0.7,1))) + bs(X2ndFlrSF, knots=quantile(house$SalePrice, p=c(0.05,0.3,0.7,1))) + bs(GrLivArea, knots=quantile(house$SalePrice, p=c(0.1, 0.75,1))) + bs(TotRmsAbvGrd, knots=quantile(house$SalePrice, p=c(0.3,0.4,0.5,0.6,0.7,0.8,0.9,1))) + bs(GarageArea, knots=quantile(house$SalePrice, p=c(0.05,0.15,0.5,0.75,1))) + bs(WoodDeckSF, knots=quantile(house$SalePrice, p=c(0.05,0.5,1))) + bs(OpenPorchSF, knots=quantile(house$SalePrice, p=c(0.05,0.6,1))), data = house_train)
+summary(spline_reg)
+#predction
+pred_spline <- predict(spline_reg, house_test[,-c(3,4)])
+#model performance
+data.frame (RMSE = RMSE(pred_spline[-c(11,100)], house_test$SalePrice))
+#cross validation
+for (i in 1:10){
+s = sample(nrow(house_train), 400*0.9)
+train <- house_train[s,]
+test <- house_train[-s,]
+
+spline_reg = lm(SalePrice ~bs(LotFrontage, knots=quantile(house$SalePrice, p=c(0.25,0.5,1))) + bs(LotArea, knots=quantile(house$SalePrice, p=c(0.2,0.4,1))) + bs(MasVnrArea, knots=quantile(house$SalePrice, p=c(0.05,0.25,0.75,1))) + bs(TotalBsmtSF, knots=quantile(house$SalePrice, p=c(0.15,0.7,1))) + bs(X1stFlrSF, knots=quantile(house$SalePrice, p=c(0.7,1))) + bs(X2ndFlrSF, knots=quantile(house$SalePrice, p=c(0.05,0.3,0.7,1))) + bs(GrLivArea, knots=quantile(house$SalePrice, p=c(0.1, 0.75,1))) + bs(TotRmsAbvGrd, knots=quantile(house$SalePrice, p=c(0.3,0.4,0.5,0.6,0.7,0.8,0.9,1))) + bs(GarageArea, knots=quantile(house$SalePrice, p=c(0.05,0.15,0.5,0.75,1))) + bs(WoodDeckSF, knots=quantile(house$SalePrice, p=c(0.05,0.5,1))) + bs(OpenPorchSF, knots=quantile(house$SalePrice, p=c(0.05,0.6,1))), data = train)
+
+pred = predict(spline_reg, test)
+RMSE[i] = sqrt(mean((pred - test$SalePrice)^2))
+}
+RMSE <- as.data.frame(RMSE)
+RMSE
+```
+
+
+
+
+Regression tree
+```{r}
+train = sample(1:nrow(house),nrow(house)/2)
+test_tree = house[-train, 'SalePrice']
+reg_tree = tree(SalePrice ~ ., data = house[train,], method = 'class')
+summary(reg_tree)
+#plot
+plot(reg_tree)
+text(reg_tree, pretty = 0, cex = 0.7)
+#result and MSE
+pred_10 = predict(reg_tree, house[-train,])
+RMSE = sqrt(mean((predict(reg_tree, house[-train,]) - house[-train,]$SalePrice)^2))
+#plot against predicted graph and actual graph
+#cv
+cv_reg_tree = cv.tree(reg_tree)
+plot(cv_reg_tree$size, cv_reg_tree$dev, type = 'b', ylab = 'error of regression tree', xlab = 'tree size')
+prune_reg_tree = prune.tree(reg_tree, best = 5)
+plot(prune_reg_tree)
+text(prune_reg_tree, cex = 0.7)
+pred = predict(prune_reg_tree, newdata = house[-train,])
+#plot
+par(mfrow = c(1,2))
+plot(pred_10, test_tree, ylab = 'actual price', xlab = 'predicted price', main = 'tree size of 10')
+abline(0,1)
+plot(pred, test_tree, ylab = 'actual price', xlab = 'predicted price', main = 'tree size of 5')
+abline(0,1)
+
+# a for loop is setup in order to find all result
+tree_result_RMSE = c()
+for (i in 5:10)  tree_result_RMSE[i-4] = sqrt(mean((predict(prune.tree(reg_tree, best = i), house[-train,]) - test_tree)^2))
+tree_result_RMSE = as.data.frame(tree_result_RMSE)
+row.names(tree_result_RMSE) = paste('RMSE of tree size', 5:10, sep = '_')
+tree_result_RMSE
+
+
+```
+
+gbm
+```{r}
+caretGrid <- expand.grid(interaction.depth=c(1, 3, 5), 
+                         n.trees = (0:50)*50,
+                         shrinkage=c(0.01, 0.001),
+                         n.minobsinnode=10)
+metric <- "RMSE"
+numfolds = trainControl( method = "cv", number = 10)
+cv_gbm = train(SalePrice ~ ., 
+               data = house_train,
+               method = 'gbm', 
+               trControl = numfolds,
+               tuneGrid=caretGrid,
+               metric = metric)
+summary(cv_gbm)
+plot(cv_gbm)
+#show the error 
+cv_gbm$results
+#predict test and compare
+pred = predict(cv_gbm, house_test)
+cbind(house_test$SalePrice, pred)
+RSS = sum((pred - house_test$SalePrice)^(2))
+MSE = RSS/nrow(house_test)
+RMSE = sqrt(MSE)
+```
+
+PCR
+```{r}
+house4pcr = house[,-1]
+Saleprice_train = house4pcr$SalePrice[train]
+Saleprice_test = house4pcr$SalePrice[-train]
+house4pcr = model.matrix(SalePrice ~ . , house4pcr)[,-1]
+house4pcr_test = house4pcr[-train,]
+house4pcr_train = house4pcr[train,]
+pcr = pls::pcr(Saleprice_train ~ house4pcr_train, scale=TRUE, validation="CV")
+summary(pcr)
+validationplot(pcr, val.type="MSEP")
+pcr_pred = predict(pcr, house4pcr[-train,])
+RMSE = sqrt(mean((pcr_pred - Saleprice_test)^2))
+#RMSE for 13 components
+RMSE = sqrt(mean((predict(pcr, house4pcr[-train,], ncomp = 13) - Saleprice_test)^2))
+#for loop of the RMSE table
+RMSE_table = c()
+for (i in 1:13) RMSE_table[i] = sqrt(mean((predict(pcr, house4pcr[-train,], ncomp = i) - Saleprice_test)^2))
+RMSE_table = as.data.frame(RMSE_table)
+rownames(RMSE_table) = paste('RMSE of ', 1:13, 'comp')
+
+```
+
+pls
+```{r}
+house4pls = house[,-1]
+pls = plsr(SalePrice ~ . , data = house4pls, subset = train, scale=TRUE, validation="CV")
+summary(pls)
+validationplot(pls,val.type="MSEP")
+RMSE_pls = c()
+for (i in 1:13) RMSE_pls[i] = sqrt(mean((predict(pls, house[-train,], ncomp = i) - house$SalePrice[-train])^2))
+RMSE_pls = as.data.frame(RMSE_pls)
+rownames(RMSE_pls) = paste('RMSE of ', 1:13, 'comp')
+
+```
